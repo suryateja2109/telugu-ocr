@@ -237,7 +237,7 @@ def get_page_details(page_id: int):
                 
             # Get text blocks
             cur.execute("""
-                SELECT text_block_id, text_content, block_type, x1, y1, x2, y2 
+                SELECT text_block_id, text_content, block_type, x1, y1, x2, y2, associated_image_id 
                 FROM text_blocks 
                 WHERE page_id = %s 
                 ORDER BY y1, x1;
@@ -476,10 +476,25 @@ def download_database_dump():
     )
 
 
+@app.get("/api/download/json/layout")
+def download_layout_json():
+    """Download the raw parsed OCR layout JSON file."""
+    layout_path = os.path.join(db_config.JSON_DIR, "telugu_content_list.json")
+    if not os.path.exists(layout_path):
+        raise HTTPException(status_code=404, detail="Raw layout JSON file not found")
+    return FileResponse(
+        path=layout_path,
+        media_type="application/json",
+        filename="telugu_content_list.json"
+    )
+
+
 @app.get("/api/download/pdf/original")
 def download_original_pdf():
     """Download the original scanned PDF."""
     pdf_path = "/home/surya/project/telugu.pdf"
+    if not os.path.exists(pdf_path):
+        pdf_path = os.path.join(db_config.JSON_DIR, "telugu.pdf")
     if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="Original scanned PDF not found")
     return FileResponse(
@@ -494,6 +509,8 @@ def download_reconstructed_pdf():
     """Download the reconstructed searchable PDF."""
     pdf_path = "/home/surya/project/construct.pdf"
     if not os.path.exists(pdf_path):
+        pdf_path = os.path.join(db_config.JSON_DIR, "construct.pdf")
+    if not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="Reconstructed PDF not found")
     return FileResponse(
         path=pdf_path,
@@ -506,6 +523,8 @@ def download_reconstructed_pdf():
 def download_reconstructed_docx():
     """Download the reconstructed Word Document."""
     docx_path = "/home/surya/project/construct.docx"
+    if not os.path.exists(docx_path):
+        docx_path = os.path.join(db_config.JSON_DIR, "construct.docx")
     if not os.path.exists(docx_path):
         raise HTTPException(status_code=404, detail="Reconstructed Word Document not found")
     return FileResponse(

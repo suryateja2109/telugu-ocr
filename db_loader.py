@@ -2,15 +2,18 @@
 """
 Telugu Document DB Loader
 Loads parsed OCR JSON and images into PostgreSQL.
+Integrates text-inside-image association and dumps database updates.
 
 Usage:
-    python3 db_loader.py --dir /home/surya/project/auto --doc-name telugu.pdf
+    python3 db_loader.py --dir /home/surya/project/auto --doc-name "బాలగీతావళి (Telugu Searchable PDF)"
 """
 
 import os
 import sys
 import json
 import argparse
+import shutil
+import subprocess
 import psycopg2
 import psycopg2.extras
 from psycopg2 import sql
@@ -61,6 +64,32 @@ def read_image_bytes(image_path_or_name, images_dir):
     return None
 
 
+def is_inside(box_inner, box_outer, threshold=0.7):
+    """
+    Check if box_inner is inside or overlaps significantly with box_outer.
+    Coordinates: [x1, y1, x2, y2]
+    """
+    ix1, iy1, ix2, iy2 = box_inner
+    ox1, oy1, ox2, oy2 = box_outer
+    
+    # Calculate intersection
+    rx1 = max(ix1, ox1)
+    ry1 = max(iy1, oy1)
+    rx2 = min(ix2, ox2)
+    ry2 = min(iy2, oy2)
+    
+    if rx1 >= rx2 or ry1 >= ry2:
+        return False
+        
+    inter_area = (rx2 - rx1) * (ry2 - ry1)
+    inner_area = (ix2 - ix1) * (iy2 - iy1)
+    
+    if inner_area <= 0:
+        return False
+        
+    return (inter_area / inner_area) >= threshold
+
+
 def process_detailed_json(conn, doc_id, data, images_dir):
     """Process telugu_content_list.json containing layout block detail."""
     cur = conn.cursor()
@@ -81,9 +110,43 @@ def process_detailed_json(conn, doc_id, data, images_dir):
         page_id = cur.fetchone()[0]
         page_id_map[idx] = page_id
 
-    # 2. Parse text blocks and images
+    # 2. Insert Images first to obtain generated image_ids
+    images_by_page = {}  # page_id -> list of {"image_id": image_id, "bbox": [x1, y1, x2, y2]}
+    total_images_loaded = 0
+    
+    print("  Ingesting images and extracting binary content...")
+    for item in data:
+        page_idx = item.get("page_idx")
+        if page_idx is None or page_idx not in page_id_map:
+            continue
+        
+        page_id = page_id_map[page_idx]
+        block_type = item.get("type", "text")
+        bbox = item.get("bbox", [0.0, 0.0, 0.0, 0.0])
+        
+        if not isinstance(bbox, list) or len(bbox) < 4:
+            bbox = [0.0, 0.0, 0.0, 0.0]
+        x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+        
+        img_path = item.get("img_path", "")
+        if img_path or block_type == "image":
+            img_name = os.path.basename(img_path) if img_path else f"page_{page_idx}_img.jpg"
+            img_data = read_image_bytes(img_path, images_dir)
+            
+            cur.execute(
+                "INSERT INTO images (page_id, image_name, image_path, x1, y1, x2, y2, image_data) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING image_id;",
+                (page_id, img_name, img_path or img_name, x1, y1, x2, y2, psycopg2.Binary(img_data) if img_data else None)
+            )
+            image_id = cur.fetchone()[0]
+            total_images_loaded += 1
+            
+            if page_id not in images_by_page:
+                images_by_page[page_id] = []
+            images_by_page[page_id].append({"image_id": image_id, "bbox": [x1, y1, x2, y2]})
+
+    # 3. Parse and assign text blocks (associate with images if inside image boundaries)
     text_blocks_batch = []
-    images_batch = []
     
     for item in data:
         page_idx = item.get("page_idx")
@@ -95,43 +158,35 @@ def process_detailed_json(conn, doc_id, data, images_dir):
         text_content = item.get("text", "")
         bbox = item.get("bbox", [0.0, 0.0, 0.0, 0.0])
         
-        # Format bounding box coordinates safely
         if not isinstance(bbox, list) or len(bbox) < 4:
             bbox = [0.0, 0.0, 0.0, 0.0]
         x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
         
-        # If type is text or discarded or equation (with text content)
+        # We only store non-empty text blocks (or table / equation content)
         if text_content and block_type in ("text", "discarded", "equation", "table"):
-            text_blocks_batch.append((page_id, text_content, x1, y1, x2, y2, block_type))
+            associated_image_id = None
             
-        # If item has image path
-        img_path = item.get("img_path", "")
-        if img_path or block_type == "image":
-            # Some equation blocks also have image paths
-            img_name = os.path.basename(img_path) if img_path else f"page_{page_idx}_img.jpg"
-            img_data = read_image_bytes(img_path, images_dir)
-            images_batch.append((page_id, img_name, img_path or img_name, x1, y1, x2, y2, psycopg2.Binary(img_data) if img_data else None))
+            # Check if this text block falls inside any of the page's images
+            if page_id in images_by_page:
+                for img in images_by_page[page_id]:
+                    if is_inside([x1, y1, x2, y2], img["bbox"]):
+                        associated_image_id = img["image_id"]
+                        block_type = "text_inside_image"
+                        break
+                        
+            text_blocks_batch.append((page_id, text_content, x1, y1, x2, y2, block_type, associated_image_id))
 
-    # 3. Perform batch insertion for text blocks
+    # 4. Perform batch insertion for text blocks
     if text_blocks_batch:
         print(f"  Batch inserting {len(text_blocks_batch)} text blocks...")
         insert_text_query = """
-            INSERT INTO text_blocks (page_id, text_content, x1, y1, x2, y2, block_type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s);
+            INSERT INTO text_blocks (page_id, text_content, x1, y1, x2, y2, block_type, associated_image_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
         """
         psycopg2.extras.execute_batch(cur, insert_text_query, text_blocks_batch, page_size=200)
 
-    # 4. Perform batch insertion for images
-    if images_batch:
-        print(f"  Batch inserting {len(images_batch)} images...")
-        insert_image_query = """
-            INSERT INTO images (page_id, image_name, image_path, x1, y1, x2, y2, image_data)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """
-        psycopg2.extras.execute_batch(cur, insert_image_query, images_batch, page_size=100)
-
     cur.close()
-    return len(unique_page_indices), len(text_blocks_batch), len(images_batch)
+    return len(page_id_map), len(text_blocks_batch), total_images_loaded
 
 
 def process_flat_json(conn, doc_id, data, images_dir):
@@ -158,7 +213,7 @@ def process_flat_json(conn, doc_id, data, images_dir):
         # Add full page text as a block
         text_content = page_item.get("text_content", "")
         if text_content:
-            text_blocks_batch.append((page_id, text_content, 0.0, 0.0, 0.0, 0.0, "text"))
+            text_blocks_batch.append((page_id, text_content, 0.0, 0.0, 0.0, 0.0, "text", None))
             
         # Add page image if present
         img_name = page_item.get("image_filename", "")
@@ -169,8 +224,8 @@ def process_flat_json(conn, doc_id, data, images_dir):
     if text_blocks_batch:
         print(f"  Batch inserting {len(text_blocks_batch)} text blocks...")
         insert_text_query = """
-            INSERT INTO text_blocks (page_id, text_content, x1, y1, x2, y2, block_type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s);
+            INSERT INTO text_blocks (page_id, text_content, x1, y1, x2, y2, block_type, associated_image_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
         """
         psycopg2.extras.execute_batch(cur, insert_text_query, text_blocks_batch, page_size=200)
 
@@ -189,12 +244,31 @@ def process_flat_json(conn, doc_id, data, images_dir):
 def main():
     parser = argparse.ArgumentParser(description="Ingest parsed Telugu document OCR into PostgreSQL.")
     parser.add_argument("--dir", default=db_config.JSON_DIR, help="Directory containing JSON files")
-    parser.add_argument("--doc-name", default="telugu.pdf", help="Document Name metadata")
+    parser.add_argument("--doc-name", default="బాలగీతావళి (Telugu Searchable PDF)", help="Document Name metadata")
     args = parser.parse_args()
 
     print(f"=== Starting Ingestion from: {args.dir} ===")
     
-    # 1. Locate JSON files in specified directory
+    # Copy reconstructed PDF & input PDF to the paths served by the API
+    reconstructed_src = "/home/surya/projectk/telugu_ocr.pdf"
+    reconstructed_dst = "/home/surya/project/construct.pdf"
+    if os.path.exists(reconstructed_src):
+        try:
+            shutil.copy2(reconstructed_src, reconstructed_dst)
+            print(f"Copied reconstructed PDF to {reconstructed_dst}")
+        except Exception as e:
+            print(f"Warning: Failed to copy reconstructed PDF: {e}")
+            
+    input_src = "/home/surya/projectk/telugu.pdf"
+    input_dst = "/home/surya/project/telugu.pdf"
+    if os.path.exists(input_src):
+        try:
+            shutil.copy2(input_src, input_dst)
+            print(f"Copied input PDF to {input_dst}")
+        except Exception as e:
+            print(f"Warning: Failed to copy input PDF: {e}")
+
+    # Locate JSON files in specified directory
     if not os.path.exists(args.dir):
         print(f"Error: Directory '{args.dir}' does not exist.")
         sys.exit(1)
@@ -216,9 +290,7 @@ def main():
         target_file = "pages_data.json"
         is_detailed = False
     else:
-        # Fallback to any json
         target_file = json_files[0]
-        # Try to inspect structure
         try:
             with open(os.path.join(args.dir, target_file), "r", encoding="utf-8") as f:
                 sample = json.load(f)
@@ -247,7 +319,7 @@ def main():
         print(f"Error reading JSON file {json_path}: {e}")
         sys.exit(1)
 
-    # 2. Connect to Database
+    # Connect to Database
     print(f"Connecting to database {db_config.DB_NAME} on {db_config.DB_HOST}...")
     try:
         conn = get_connection()
@@ -260,16 +332,14 @@ def main():
         conn.autocommit = False
         cur = conn.cursor()
         
-        # 3. Create or clean document entry to handle duplicates/re-ingest
+        # Create or clean document entry to handle duplicates/re-ingest
         cur.execute("SELECT document_id FROM documents WHERE document_name = %s;", (args.doc_name,))
         row = cur.fetchone()
         if row:
             doc_id = row[0]
             print(f"Document '{args.doc_name}' already exists (ID: {doc_id}). Cleaning old records...")
-            # Deleting from documents triggers cascade delete on pages, text_blocks, and images
             cur.execute("DELETE FROM documents WHERE document_id = %s;", (doc_id,))
             
-        # Calculate total pages
         if is_detailed:
             total_pages = max(item.get("page_idx", 0) for item in data) + 1 if data else 0
         else:
@@ -282,7 +352,7 @@ def main():
         doc_id = cur.fetchone()[0]
         print(f"Registered document '{args.doc_name}' with ID: {doc_id}")
 
-        # 4. Ingest pages, blocks, and images
+        # Ingest pages, blocks, and images
         if is_detailed:
             inserted_pages, inserted_blocks, inserted_images = process_detailed_json(conn, doc_id, data, images_dir)
         else:
@@ -298,6 +368,25 @@ def main():
         print(f"  Text Blocks : {inserted_blocks}")
         print(f"  Images Loaded: {inserted_images}")
         print("==========================================")
+        
+        # Generate database dump file for download
+        dump_path = "/home/surya/project/telugu_db_solution/telugu_doc_db.dump"
+        print(f"Generating updated database dump at {dump_path}...")
+        try:
+            cmd = [
+                "/usr/lib/postgresql/17/bin/pg_dump",
+                "-h", "/home/surya/data/pgdata",
+                "-p", "5433",
+                "-U", "surya",
+                "-F", "c",
+                "-b",
+                "-f", dump_path,
+                "telugu_doc_db"
+            ]
+            subprocess.run(cmd, check=True)
+            print("Database dump generated successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to generate database dump: {e}")
         
     except Exception as e:
         conn.rollback()

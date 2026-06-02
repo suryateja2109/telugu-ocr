@@ -521,6 +521,11 @@
             background: rgba(245, 158, 11, 0.02);
         }
 
+        .ocr-block-item.text_inside_image {
+            border-left-color: var(--accent-success);
+            background: rgba(16, 185, 129, 0.04);
+        }
+
         .ocr-block-item-text {
             font-family: var(--font-telugu);
             font-size: 1rem;
@@ -664,6 +669,13 @@
                                 <p>Extracts all document hierarchy and text block bboxes (no binaries).</p>
                             </div>
                             <a href="/api/download/all" class="btn btn-secondary">JSON</a>
+                        </div>
+                        <div class="download-card">
+                            <div class="download-card-info">
+                                <h4>Raw OCR Layout JSON</h4>
+                                <p>The raw parsed layout block JSON (telugu_content_list.json).</p>
+                            </div>
+                            <a href="/api/download/json/layout" class="btn btn-secondary">Layout JSON</a>
                         </div>
                         <div class="download-card">
                             <div class="download-card-info">
@@ -882,10 +894,16 @@
                         div.className = `ocr-block-item ${block.block_type}`;
                         
                         let bboxLabel = block.bbox.map(x => Math.round(x)).join(', ');
+                        let typeLabel = block.block_type.replace(/_/g, ' ');
+                        let imageLinkHtml = "";
+                        if (block.associated_image_id) {
+                            imageLinkHtml = `<span class="bbox-coordinates" style="color: var(--accent-success); margin-right: auto; margin-left: 0.5rem; border-color: rgba(16,185,129,0.3);">🔗 Image ID: ${block.associated_image_id}</span>`;
+                        }
                         
                         div.innerHTML = `
-                            <div style="display:flex; justify-content:space-between; margin-bottom: 0.25rem; font-size:0.75rem; color:var(--text-secondary);">
-                                <span style="text-transform: uppercase;">${block.block_type}</span>
+                            <div style="display:flex; justify-content:space-between; align-items: center; margin-bottom: 0.25rem; font-size:0.75rem; color:var(--text-secondary);">
+                                <span style="text-transform: uppercase; font-weight: 600;">${typeLabel}</span>
+                                ${imageLinkHtml}
                                 <span class="bbox-coordinates">BBox: [${bboxLabel}]</span>
                             </div>
                             <div class="ocr-block-item-text">${escapeHtml(block.text_content)}</div>

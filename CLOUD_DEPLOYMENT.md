@@ -1,17 +1,17 @@
-# Cloud Deployment Guide (24/7 Live Website)
+# Cloud Deployment Guide (24/7 Live Website on Render)
 
-Follow these steps to deploy your Telugu Digitized Book portal to the cloud so that it stays online 24/7.
+We have prepared the repository to be self-contained and ready for automatic 1-click deployment to **Render** using a Blueprint (`render.yaml`).
 
 ---
 
 ## Step 1: Initialize Git and Push to GitHub
 
-1. Open a terminal and run the following commands to initialize a git repository in this folder and push it to a new GitHub repository:
+1. Open a terminal and run the following commands to stage all files, commit them, and link them to a new GitHub repository:
    ```bash
    cd /home/surya/project/telugu_db_solution
    git init
    git add .
-   git commit -m "Initial commit of Telugu Digitized Book Solution"
+   git commit -m "Configure self-contained cloud deployment with Render Blueprint"
    ```
 2. Create a new repository on GitHub (e.g., named `telugu-doc-portal`). Do **not** initialize it with a README, license, or gitignore.
 3. Link and push your local files:
@@ -24,32 +24,18 @@ Follow these steps to deploy your Telugu Digitized Book portal to the cloud so t
 
 ---
 
-## Step 2: Seed the Remote Database (Neon/Supabase)
+## Step 2: Deploy to Render
 
-Once you have created your free PostgreSQL database on Neon or Supabase and have the **connection string** (e.g., `postgresql://...`), run these commands from your local machine to populate the remote database:
+1. Sign up or log in to **Render** (https://render.com).
+2. Go to the dashboard and click **New** ➔ **Blueprint**.
+3. Connect your GitHub account and select the `telugu-doc-portal` repository.
+4. Render will automatically read `render.yaml` and prompt you to create:
+   - A free PostgreSQL Database named `telugu-book-db`.
+   - A Web Service named `telugu-book-portal`.
+5. Click **Apply**.
 
-1. **Initialize the database schema (create tables and search indexes)**:
-   ```bash
-   psql "YOUR_CONNECTION_STRING_HERE" -f /home/surya/project/telugu_db_solution/schema.sql
-   ```
-2. **Ingest document metadata, pages, text blocks, and images**:
-   ```bash
-   DATABASE_URL="YOUR_CONNECTION_STRING_HERE" python3 /home/surya/project/telugu_db_solution/db_loader.py --dir /home/surya/project/auto --doc-name "బాలగీతావళి (Telugu Poetry Reader)"
-   ```
+Render will now provision the database and build the Python web container. On startup, the container will run `deploy_seed.py` which:
+- Automatically initializes the database tables, indices, and trigram extensions.
+- Ingests all 37 pages, 142 text blocks, and 18 image binary crops.
 
----
-
-## Step 3: Deploy to Render (https://render.com)
-
-1. Sign up/Log in to **Render** and click **New** ➔ **Web Service**.
-2. Select your GitHub account and connect the `telugu-doc-portal` repository.
-3. Configure the following build settings:
-   *   **Runtime**: `Python`
-   *   **Build Command**: `pip install -r requirements.txt`
-   *   **Start Command**: `uvicorn api.main:app --host 0.0.0.0 --port $PORT`
-4. Expand **Advanced** ➔ **Add Environment Variable**:
-   *   **Key**: `DATABASE_URL`
-   *   **Value**: *Your database connection URI (same as used in Step 2)*
-5. Click **Create Web Service**.
-
-Render will automatically pull the code, install dependencies, build the container, and host it. It will provide you with a permanent public HTTPS URL (e.g. `https://telugu-doc-portal.onrender.com`) that stays live 24/7.
+Once deployed, Render will provide a permanent public HTTPS URL (e.g. `https://telugu-book-portal.onrender.com`) that stays live 24/7.
