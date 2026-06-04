@@ -3,7 +3,7 @@ services:
     name: telugu-book-portal
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python3 deploy_seed.py && uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python3 deploy_seed.py && python3 -m uvicorn api.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
         fromDatabase:
